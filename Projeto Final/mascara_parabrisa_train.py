@@ -1,10 +1,11 @@
 import cv2
-#from matplotlib import pyplot as plt
 import numpy as np
-#from mpl_toolkits.mplot3d import Axes3D
 import pandas as pd
 import os
-
+from sklearn.model_selection import train_test_split
+from time import time
+from sklearn.metrics import f1_score
+from sklearn.neural_network import MLPClassifier
 
 def histogram(img, l = 256):
     hist = np.zeros([l])
@@ -40,30 +41,90 @@ def limiar(x):
 def prepara_mascara(mascara):
     mascara = mascara[30:464, 2:637]
     mascara = mascara.astype(int)
-    mascara[:179, 396:] = -1
+    mascara[:179, 396:] = -255
     for i in range(mascara.shape[0]):
         mascara[i] = list(map(limiar, mascara[i]))
     return mascara
 
-def image_normalize_hsv(image):
+def hsv(image):
     image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV) #Converte RGB para HSV
-    image[:,:,2] = equalizar_histograma(image[:,:,2])
-    #image = image.astype('float')
-    #image[:, :, 0] = image[:, :, 0] / 360
-    #image[:, :, 1] = image[:, :, 1] / 100
-    #image[:, :, 2] = image[:, :, 2] / np.average(image[:, :, 2])
     return image
 
+def ycrcb(image):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb) #Converte RGB para HSV
+    return image
+
+def lab(image):
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2LAB) #Converte RGB para HSV
+    return image
+
+def carregar_imagem(filename, ext = '.jpg', color = 1):
+    image = cv2.imread(filename + ext, color)
+    return image
+
+def convolucao(img, kernel):   
+    ### add padding
+    borda = (kernel.shape[0] - 1) // 2 
+    img = np.vstack([np.zeros([borda, img.shape[1]]), img, np.zeros([borda, img.shape[1]])]) #adiciona borda em cima e embaixo da imagem com o valor de fundo
+    img = np.hstack([np.zeros([img.shape[0], borda]), img, np.zeros([img.shape[0], borda])]) #adiciona borda aos lados da imagem com o valor de fundo
+    img2 = np.zeros(img.shape)
+    ###
+    
+    for i in range(borda, img.shape[0] - borda):
+        for j in range(borda, img.shape[1] - borda):
+            for u in range(kernel.shape[0]):
+                for v in range(kernel.shape[1]):
+                    img2[i, j] += img[i - borda + u, j - borda + v] * kernel[u, v]
+                    
+    img2 = img2[borda:-1 * borda, borda:-1 * borda] # remove padding
+
+    ### normaliza valores de 0 a 255
+    #img2 -= np.min(img2)
+    #img2 = img2 / np.max(img2) * 255
+    #img2 = np.uint(img2)
+    ###
+    return img2
+
+def blurring(img):
+    kernel = np.ones([5, 5])
+    kernel = np.divide(kernel, 25)
+    img = convolucao(img, kernel)
+    return img
+
+def high_pass(img):
+    kernel = np.array([[0, -1, 0],
+                       [-1, 4, -1],
+                       [0, -1, 0]])
+    img = convolucao(img, kernel)
+    return img
+
+def add_layer(img, new_layer):
+    new_array = np.zeros([img.shape[0], img.shape[1], img.shape[2] + 1])
+    for k in range(img.shape[2]):
+        new_array[:, :, k] = img[:, :, k]
+    new_array[:, :, -1] = new_layer
+    return new_array
+
+def prepara_imagem(image):
+    imageycrcb = ycrcb(image)
+    blurred = blurring(imageycrcb[:, :, 0])
+    image = add_layer(image, blurred)
+    image = add_layer(image, array_x)
+    image = add_layer(image, array_y)
+    return image
+    
 
 def extrair_amostras(filename, color_map = ''):
-    mascara = cv2.imread(filename + '.jpg', 0)
+    mascara = carregar_imagem(filename, color = 0)
     mascara = prepara_mascara(mascara)
     
     filename = filename[:-1]
-    image = cv2.imread(filename + '.jpg', 1)
+    image = carregar_imagem(filename)
     image = image[30:464, 2:637, :]
-    if color_map == 'HSV':
-        image = image_normalize_hsv(image)
+    image = prepara_imagem(image)
+    
+    #if color_map == 'HSV':
+    #    image = image_normalize_hsv(image)
         
     x = []
     y = []
@@ -75,49 +136,28 @@ def extrair_amostras(filename, color_map = ''):
                     y.append(0)
                 else:
                     y.append(1)
-    x= np.array(x).astype('uint8')
-    y = np.array(y).astype('uint8')
+    x= np.array(x)#.astype('uint8')
+    y = np.array(y)#.astype('uint8')
+    n_samples = x.shape[0]
+    n_dimensions = x.shape[1]
+    y_column = n_dimensions
     
-    full_data = np.zeros([x.shape[0], 4])
-    full_data[:, :3] = x
-    full_data[:, 3] = y
+    full_data = np.zeros([n_samples, n_dimensions + 1])
+    full_data[:, :n_dimensions] = x
+    full_data[:, y_column] = y
     
     full_data = pd.DataFrame(full_data)
-    not_windshield = full_data[full_data[3] == 0]
-    windshield = full_data[full_data[3] == 1]
+    not_windshield = full_data[full_data[y_column] == 0]
+    windshield = full_data[full_data[y_column] == 1]
     not_windshield = not_windshield.sample(n = int(1.5 * windshield.shape[0]))
     
     good_data = pd.concat([windshield, not_windshield], ignore_index = True)
     good_data = good_data.sample(frac = 1)
     
-    X = good_data.values[:, 0:3]
-    Y = good_data.values[:, 3]
+    X = good_data.values[:, 0:n_dimensions]
+    Y = good_data.values[:, y_column]
     
     return X, Y
-
-X = np.zeros([1, 3])
-Y = np.array([0])
-dir_images = 'training_images' #diretorio que contem as imagens a serem analisadas
-files = [] # Ler os arquivos no diretorio
-for (dirpath, dirnames, filenames) in os.walk(os.getcwd() + '/' + dir_images):#'/home/jesse/ProcImg/Projeto03'):
-    files.extend(filenames)
-    break
-
-for file in files:
-    file = file[:-4]
-    if file[-1] == 'm':
-        new_X, new_Y = extrair_amostras(os.getcwd() + '/' + dir_images + '/' + file, 'RGB')
-        X = np.concatenate((X, new_X), axis = 0)
-        Y = np.concatenate((Y, new_Y))#, axis = 0)
-
-X = X[1:,:]
-Y = Y[1:]
-
-from sklearn.model_selection import train_test_split
-X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size = 0.2, random_state = 82)
-
-from time import time
-from sklearn.metrics import f1_score
 
 def train_classifier(clf, X_train, y_train):
     ''' Ajusta um classificador para os dados de treinamento. '''
@@ -157,81 +197,26 @@ def train_predict(clf, X_train, y_train, X_test, y_test):
     print ("Pontuação F1 para o conjunto de treino: {:.4f}.".format(predict_labels(clf, X_train, y_train)))
     print ("Pontuação F1 para o conjunto de teste: {:.4f}.".format(predict_labels(clf, X_test, y_test)))
 
-from sklearn.neural_network import MLPClassifier
-clf1 = MLPClassifier(hidden_layer_sizes = (50, 3), activation = 'logistic')
+####################################################################
+###                          EXECUÇÃO
+####################################################################    
 
-train_predict(clf1, X_train, Y_train, X_test, Y_test)
+array_x = np.zeros([480, 640])
+array_y = np.zeros([480, 640])
+for i in range(480):
+    for j in range(480):
+        array_x[i, j] = i
+        array_y[i, j] = j
+array_x -= 480 // 2
+array_y -= 640 // 2
+array_x = array_x[30:464, 2:637]
+array_y = array_y[30:464, 2:637]
 
-'''
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import make_scorer
 
-# lista de parâmetros a  calibrar
-hidden_layers = []
-for n_layers in range(1,5):
-    for size in [10,20,30]:
-        hidden_layers.append((size, n_layers))
-parameters = {'hidden_layer_sizes':hidden_layers, 'activation':['logistic', 'tanh', 'relu']}
-
-#função de pontuação f1 utilizando 'make_scorer' 
-f1_scorer = make_scorer(f1_score)
-
-clf = MLPClassifier( )
-# Executa uma busca em matriz no classificador utilizando o f1_scorer como método de pontuação
-grid_obj = GridSearchCV(clf, parameters)
-
-#Ajusta o objeto de busca em matriz para o treinamento de dados e encontra os parâmetros ótimos
-grid_obj.fit(X_train, Y_train)
-
-# Get the best  estimator
-clf = grid_obj.best_estimator_
-
-parametros_otimos = clf.get_params()
-parametros_otimos
-#Results
-# Imprime os resultados das estimativas de ambos treinamento e teste
-print ("Pontuação F1 para o conjunto de treino: {:.4f}.".format(predict_labels(clf, X_train, Y_train)))
-print ("Pontuação F1 para o conjunto de teste: {:.4f}.".format(predict_labels(clf, X_test, Y_test)))
-'''
-def plot_img(img):
-    cv2.namedWindow('image', cv2.WINDOW_NORMAL)
-    cv2.imshow('image',img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-#filename = '00002622327707790075353C1160220171731181805169ESREF161080080080097O000000011072016'
-
-def aplicar_mascara(filename, color_map):
-    dir_images = 'test_images' #diretorio que contem as imagens a serem analisadas
-    image = cv2.imread(dir_images + '/' + filename + '.jpg', 1)
-    image_predict = np.zeros([image.shape[0], image.shape[1]])
-    #image_predict.astype('float')
-    if color_map == 'HSV':
-        image_norm = image_normalize_hsv(image)
-    
-    for i in range(30, 464):
-        image_predict[i] = clf1.predict(image_norm[i])
-    
-    image_predict[:179, 396:] = 0
-    plot_img(image_predict)
-    
-    kernel = cv2.imread('kernel.bmp', 0)
-    kernel += 1
-    image_predict = cv2.morphologyEx(image_predict, cv2.MORPH_OPEN, kernel)
-    image_predict = cv2.morphologyEx(image_predict, cv2.MORPH_CLOSE, kernel)
-    plot_img(image_predict)
-    
-    image_predict -= 1
-    image_predict *= -1
-    
-    image_final = np.array(image)
-    for i in range(3):
-        image_final[:,:,i] = np.multiply(image_final[:,:,i], image_predict)
-    dir_save = 'imagens_processadas'
-    cv2.imwrite(os.getcwd() + '/' + dir_save + '/' + filename + '_proc.jpg', image_final)
-    plot_img(image_final)
-
-dir_images = 'small_test'#'test_images' #diretorio que contem as imagens a serem analisadas
+n_dim = 6
+X = np.zeros([1, n_dim])
+Y = np.array([0])
+dir_images = 'training_images' #diretorio que contem as imagens a serem analisadas
 files = [] # Ler os arquivos no diretorio
 for (dirpath, dirnames, filenames) in os.walk(os.getcwd() + '/' + dir_images):#'/home/jesse/ProcImg/Projeto03'):
     files.extend(filenames)
@@ -239,15 +224,16 @@ for (dirpath, dirnames, filenames) in os.walk(os.getcwd() + '/' + dir_images):#'
 
 for file in files:
     file = file[:-4]
-    aplicar_mascara(file, 'HSV')
-    
+    if file[-1] == 'm':
+        new_X, new_Y = extrair_amostras(os.getcwd() + '/' + dir_images + '/' + file, 'RGB')
+        X = np.concatenate((X, new_X), axis = 0)
+        Y = np.concatenate((Y, new_Y))#, axis = 0)
 
-def plot_img(img):
-    cv2.namedWindow('image', cv2.WINDOW_NORMAL)
-    cv2.imshow('image',img)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-    
-plot_img(image)
-    
-#    plot_img(image_predict)
+X = X[1:,:]
+Y = Y[1:]
+
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size = 0.3, random_state = 82)
+
+clf1 = MLPClassifier(hidden_layer_sizes = (50, 3), activation = 'logistic')
+
+train_predict(clf1, X_train, Y_train, X_test, Y_test)
